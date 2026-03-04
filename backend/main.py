@@ -1,6 +1,6 @@
 # backend/main.py
-from fastapi import FastAPI, File, UploadFile, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, UploadFile, Request, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import cv2
 import numpy as np
@@ -78,6 +78,85 @@ STATE = {
     "prev_centroid": None,
     "sound_status": "Waiting...",
 }
+
+
+# ------------------ Backend Camera Service ------------------
+class BackendCamera:
+    """Simple backend camera manager that continuously grabs frames
+    and makes them available for processing/streaming.  The frontend only
+    needs to request the MJPEG stream; nothing ever leaves the server.
+    """
+    def __init__(self, index:int=0):
+        self.index = index
+        self.cap = None
+        self.running = False
+        self.lock = threading.Lock()
+        self.frame = None
+        self.thread = None
+
+    def _ensure_capture(self):
+        if self.cap is None or not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(self.index)
+        return self.cap is not None and self.cap.isOpened()
+
+    def start(self):
+        if self.running:
+            return
+        if not self._ensure_capture():
+            raise RuntimeError("Could not open camera")
+        self.running = True
+        self.thread = threading.Thread(target=self._worker, daemon=True)
+        self.thread.start()
+
+    def _worker(self):
+        while self.running and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if ret:
+                with self.lock:
+                    self.frame = frame.copy()
+            else:
+                time.sleep(0.01)
+
+    def stop(self):
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=1)
+        if self.cap:
+            self.cap.release()
+        self.cap = None
+        self.frame = None
+
+    def get_frame(self):
+        with self.lock:
+            return None if self.frame is None else self.frame.copy()
+
+    def gen_frames(self):
+        """Generator yielding MJPEG frames.  You can insert processing here"""
+        while self.running:
+            frame = self.get_frame()
+            if frame is None:
+                time.sleep(0.01)
+                continue
+            # apply same processing logic as /process endpoint
+            annotated = frame.copy()
+            visual_ok = False
+            acid_detected = False
+            if not STATE["rubbing_done"]:
+                annotated, info = process_rubbing_frame(frame, MODEL_STONE, MODEL_GOLD)
+                annotated, is_rubbing = compute_rubbing(annotated, info)
+                visual_ok = is_rubbing
+                if visual_ok and STATE["sound_status"] == "OK":
+                    STATE["rubbing_done"] = True
+                    STATE["stage"] = "ACID"
+            else:
+                annotated, acid_detected = process_acid_frame(frame, MODEL_ACID)
+                if acid_detected:
+                    STATE["stage"] = "COMPLETED"
+            _, buf = cv2.imencode('.jpg', annotated)
+            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
+
+# singleton instance
+camera_backend = BackendCamera()
 
 sound_queue = queue.Queue(maxsize=1)
 
@@ -479,6 +558,31 @@ async def offer(request: Request):
 
     return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
 
+
+# ------------------- Backend camera control -------------------
+@app.post("/camera/start")
+async def api_camera_start():
+    """Open the physical camera and begin capturing frames on the server."""
+    try:
+        camera_backend.start()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"running": camera_backend.running}
+
+@app.post("/camera/stop")
+async def api_camera_stop():
+    camera_backend.stop()
+    return {"running": camera_backend.running}
+
+@app.get("/camera/status")
+async def api_camera_status():
+    return {"running": camera_backend.running, "available": camera_backend.cap.isOpened() if camera_backend.cap else False}
+
+@app.get("/camera/stream")
+async def api_camera_stream():
+    """MJPEG stream endpoint for the frontend to display processed frames."""
+    return StreamingResponse(camera_backend.gen_frames(), media_type="multipart/x-mixed-replace; boundary=frame")
+
 @app.on_event("shutdown")
 async def on_shutdown():
     """Close all WebRTC connections on shutdown"""
@@ -496,6 +600,10 @@ def health():
     }
 
 # ====================== API ENDPOINT ======================
+# legacy endpoint – accepts a JPEG upload from the frontend camera.
+# In the new workflow the server pulls its own camera frames; see
+# `/camera/start` and `/camera/stream` above.  This handler is kept for
+# backwards compatibility but clients should no longer send images.
 @app.post("/process")
 async def process_frame(frame: UploadFile = File(...)):
     global STATE

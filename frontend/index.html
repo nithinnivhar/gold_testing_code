@@ -373,40 +373,40 @@
 
 
     async function startCamera() {
+      // New workflow: tell backend to open its own camera and stream processed
+      // frames.  The frontend no longer needs direct access to the device.
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: CAPTURE_WIDTH },
-            height: { ideal: CAPTURE_HEIGHT }
-          }
-        });
-        video.srcObject = stream;
+        const base = BACKEND_URL.replace(/\/process$/, '');
+        await fetch(`${base}/camera/start`, { method: 'POST' });
 
-        // Start audio streaming via WebRTC
+        // point the <img id="processed"> element at the MJPEG feed
+        processed.src = `${base}/camera/stream`;
+        processed.style.opacity = "1";
+
+        // audio can still stream via WebRTC if you wish
         await startAudioStreaming();
 
         startBtn.disabled = true;
         stopBtn.disabled = false;
         audioDeviceSelect.disabled = true;
-        stageEl.textContent = "Camera started • Processing starting...";
+        stageEl.textContent = "Backend camera started – viewing only";
       } catch (err) {
-        alert("Camera access failed: " + err.message);
-        stageEl.textContent = "Camera access denied";
+        alert("Unable to start backend camera: " + err.message);
+        stageEl.textContent = "Backend camera error";
       }
     }
 
     function stopEverything() {
+      // inform backend so camera resource is released
+      const base = BACKEND_URL.replace(/\/process$/, '');
+      fetch(`${base}/camera/stop`, { method: 'POST' }).catch(() => { });
+
       if (intervalId) {
         clearInterval(intervalId);
         intervalId = null;
       }
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-        stream = null;
-        video.srcObject = null;
-      }
 
-      // Stop audio streaming
+      // stop audio streaming
       stopAudioStreaming();
 
       processed.src = "";
@@ -420,73 +420,17 @@
       acidEl.textContent = "—"; acidEl.className = "";
     }
 
+    // sendFrame() is no longer used because the server grabs frames
+    // from its own camera.  The function is retained only for reference
+    // (and could be removed entirely).
     function sendFrame() {
-      if (!video.videoWidth || isProcessing) return;
-
-      isProcessing = true;
-
-      const canvas = document.createElement('canvas');
-      // We force 640×480 output (most models work well with this size)
-      canvas.width = CAPTURE_WIDTH;
-      canvas.height = CAPTURE_HEIGHT;
-
-      const ctx = canvas.getContext('2d');
-      // Center-crop or letterbox — here we simply scale to fit
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-      canvas.toBlob(async (blob) => {
-        if (!blob) {
-          isProcessing = false;
-          return;
-        }
-
-        try {
-          const formData = new FormData();
-          formData.append("frame", blob, "frame.jpg");
-
-          const res = await fetch(BACKEND_URL, {
-            method: "POST",
-            body: formData
-          });
-
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-          const data = await res.json();
-
-          // Update UI
-          processed.src = `data:image/jpeg;base64,${data.image}`;
-          processed.style.opacity = "1";
-
-          stageEl.textContent = data.stage || "—";
-
-          visualEl.textContent = data.visual_ok ? "OK" : "NOT OK";
-          visualEl.className = data.visual_ok ? "ok" : "error";
-
-          soundEl.textContent = data.sound_status || "Waiting...";
-          soundEl.className =
-            data.sound_status === "OK" ? "ok" :
-              data.sound_status === "NOT OK" ? "error" : "";
-
-          acidEl.textContent = data.acid_detected ? "ACID DETECTED!" : "No Acid";
-          acidEl.className = data.acid_detected ? "ok" : "";
-
-        } catch (e) {
-          console.error("Send frame error:", e);
-          stageEl.textContent = `Connection error: ${e.message}`;
-        } finally {
-          isProcessing = false;
-        }
-      }, 'image/jpeg', JPEG_QUALITY);
+      // no-op — backend grabs frames from its own camera
     }
 
     // ==================== EVENT LISTENERS ====================
 
     startBtn.onclick = async () => {
       await startCamera();
-      if (!stream) return;
-
-      // Start sending frames
-      intervalId = setInterval(sendFrame, 1000 / TARGET_FPS);
     };
 
     stopBtn.onclick = stopEverything;
