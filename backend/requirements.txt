@@ -1,0 +1,20 @@
+# Core API framework
+fastapi
+uvicorn[standard]
+
+# Computer Vision
+opencv-python
+numpy
+
+# Deep Learning
+torch
+torchvision
+
+# YOLO Object Detection
+ultralytics
+
+# WebRTC
+aiortc
+av
+
+# Utilities (stdlib, no install needed: os, threading, queue, re, time, asyncio, logging, json, datetime, base64, collections)
