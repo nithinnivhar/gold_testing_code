@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gold Rubbing & Acid Test</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #0f0f1a;
+      color: #e0e0ff;
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    h1 {
+      color: #ffd700;
+      margin-bottom: 10px;
+      text-shadow: 0 0 10px #ffd70044;
+    }
+
+    .container {
+      max-width: 1100px;
+      width: 100%;
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      gap: 24px;
+    }
+
+    .video-area {
+      background: #000;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 0 20px rgba(0, 0, 0, 0.7);
+      position: relative;
+    }
+
+    #preview,
+    #processed {
+      width: 100%;
+      height: auto;
+      display: block;
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+
+    #preview {
+      opacity: 0.92;
+      z-index: 1;
+    }
+
+    #processed {
+      opacity: 0;
+      transition: opacity 0.35s ease-in-out;
+      z-index: 2;
+    }
+
+    .controls {
+      background: #1a1a2e;
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    }
+
+    .status {
+      margin: 16px 0;
+      padding: 12px;
+      border-radius: 8px;
+      background: #16213e;
+      min-height: 100px;
+    }
+
+    select {
+      padding: 12px;
+      font-size: 1rem;
+      margin: 8px 0;
+      border: 2px solid #3a3a5e;
+      border-radius: 8px;
+      background: #16213e;
+      color: #e0e0ff;
+      cursor: pointer;
+      transition: all 0.2s;
+      width: 100%;
+    }
+
+    select:hover {
+      border-color: #5a5a8e;
+    }
+
+    select:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .device-selector {
+      margin: 12px 0;
+    }
+
+    .device-selector label {
+      display: block;
+      margin-bottom: 6px;
+      color: #ffd700;
+      font-weight: 600;
+      font-size: 0.95rem;
+    }
+
+    button {
+      padding: 14px 28px;
+      font-size: 1.1rem;
+      margin: 8px 0;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+      width: 100%;
+    }
+
+    #startBtn {
+      background: #00c853;
+      color: white;
+    }
+
+    #startBtn:hover {
+      background: #00b140;
+    }
+
+    #stopBtn {
+      background: #d50000;
+      color: white;
+    }
+
+    #stopBtn:hover {
+      background: #b71c1c;
+    }
+
+    .stage-title {
+      font-size: 1.4rem;
+      font-weight: bold;
+      margin: 12px 0 8px;
+    }
+
+    .ok {
+      color: #00ff9d;
+      font-weight: bold;
+    }
+
+    .warn {
+      color: #ffab00;
+    }
+
+    .error {
+      color: #ff5252;
+      font-weight: bold;
+    }
+
+    @media (max-width: 900px) {
+      .container {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+  <h1>Gold Testing System</h1>
+
+  <div class="container">
+    <div class="video-area">
+      <video id="preview" autoplay playsinline muted></video>
+      <img id="processed" alt="Processed frame" />
+    </div>
+
+    <div class="controls">
+      <div class="device-selector">
+        <label for="audioDeviceSelect">🎤 Microphone Device:</label>
+        <select id="audioDeviceSelect">
+          <option value="">Loading devices...</option>
+        </select>
+      </div>
+      <button id="startBtn">Start Camera & Processing</button>
+      <button id="stopBtn" disabled>Stop</button>
+
+      <div class="status">
+        <div class="stage-title">Current Stage</div>
+        <div id="stage">Waiting to start...</div>
+
+        <div style="margin-top:16px; line-height:1.6;">
+          Visual Rubbing: <span id="visual">—</span><br>
+          Sound Status: <span id="sound">—</span><br>
+          Acid Detection: <span id="acid">—</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ====================== CONFIG ======================
+    const BACKEND_URL = "http://127.0.0.1:8000/process";
+    const TARGET_FPS = 6;               // ← increased from 4 — you can try 8–10 later
+    const JPEG_QUALITY = 0.72;            // ← slightly lower = faster upload
+    const CAPTURE_WIDTH = 640;             // Main resolution control
+    const CAPTURE_HEIGHT = 480;            // Target 640×480
+
+    // Elements
+    const video = document.getElementById('preview');
+    const processed = document.getElementById('processed');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const stageEl = document.getElementById('stage');
+    const visualEl = document.getElementById('visual');
+    const soundEl = document.getElementById('sound');
+    const acidEl = document.getElementById('acid');
+    const audioDeviceSelect = document.getElementById('audioDeviceSelect');
+
+    // State
+    let stream = null;
+    let intervalId = null;
+    let isProcessing = false;
+    let peerConnection = null;
+    let dataChannel = null;
+    let audioStream = null;
+    let selectedAudioDeviceId = null;
+
+    // ==================== AUDIO DEVICE ENUMERATION ====================
+
+    async function loadAudioDevices() {
+      try {
+        // Request permission first
+        const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        tempStream.getTracks().forEach(track => track.stop());
+
+        // Now enumerate devices
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const audioInputs = devices.filter(device => device.kind === 'audioinput');
+
+        audioDeviceSelect.innerHTML = '';
+
+        if (audioInputs.length === 0) {
+          audioDeviceSelect.innerHTML = '<option value="">No microphones found</option>';
+          return;
+        }
+
+        audioInputs.forEach((device, index) => {
+          const option = document.createElement('option');
+          option.value = device.deviceId;
+          option.textContent = device.label || `Microphone ${index + 1}`;
+          audioDeviceSelect.appendChild(option);
+        });
+
+        // Set the first device as default
+        selectedAudioDeviceId = audioInputs[0].deviceId;
+
+      } catch (err) {
+        console.error('Error loading audio devices:', err);
+        audioDeviceSelect.innerHTML = '<option value="">Permission denied</option>';
+      }
+    }
+
+    // Update selected device when user changes it
+    audioDeviceSelect.onchange = () => {
+      selectedAudioDeviceId = audioDeviceSelect.value;
+    };
+
+
+    // Load devices on page load
+    loadAudioDevices();
+
+    // ==================== WEBRTC AUDIO STREAMING ====================
+
+    async function startAudioStreaming() {
+      if (!selectedAudioDeviceId) {
+        console.warn('No audio device selected');
+        return;
+      }
+
+      try {
+        // Get audio stream from selected device
+        audioStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: { exact: selectedAudioDeviceId },
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false
+          }
+        });
+
+        // Create WebRTC peer connection
+        peerConnection = new RTCPeerConnection({
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        });
+
+        // Create data channel for receiving predictions
+        dataChannel = peerConnection.createDataChannel('audio-predictions');
+
+        dataChannel.onopen = () => {
+          console.log('DataChannel opened');
+        };
+
+        dataChannel.onmessage = (event) => {
+          try {
+            const prediction = JSON.parse(event.data);
+            console.log('Audio prediction:', prediction);
+
+            // Update sound status UI
+            soundEl.textContent = `${prediction.label} (${(prediction.confidence * 100).toFixed(1)}%)`;
+            soundEl.className = prediction.label === 'OK' ? 'ok' : 'error';
+          } catch (e) {
+            console.error('Error parsing prediction:', e);
+          }
+        };
+
+        // Add audio track to peer connection
+        audioStream.getAudioTracks().forEach(track => {
+          peerConnection.addTrack(track, audioStream);
+        });
+
+        // Create and send offer
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+
+        // Send offer to backend
+        const response = await fetch('http://127.0.0.1:8000/offer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sdp: peerConnection.localDescription.sdp,
+            type: peerConnection.localDescription.type
+          })
+        });
+
+        if (!response.ok) {
+          throw new Error(`WebRTC signaling failed: ${response.status}`);
+        }
+
+        const answer = await response.json();
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+
+        console.log('WebRTC audio streaming started');
+
+      } catch (err) {
+        console.error('Audio streaming error:', err);
+        alert('Failed to start audio streaming: ' + err.message);
+      }
+    }
+
+    function stopAudioStreaming() {
+      if (dataChannel) {
+        dataChannel.close();
+        dataChannel = null;
+      }
+
+      if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+      }
+
+      if (audioStream) {
+        audioStream.getTracks().forEach(track => track.stop());
+        audioStream = null;
+      }
+
+      console.log('Audio streaming stopped');
+    }
+
+    // ====================================================
+
+
+    async function startCamera() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: CAPTURE_WIDTH },
+            height: { ideal: CAPTURE_HEIGHT }
+          }
+        });
+        video.srcObject = stream;
+
+        // Start audio streaming via WebRTC
+        await startAudioStreaming();
+
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        audioDeviceSelect.disabled = true;
+        stageEl.textContent = "Camera started • Processing starting...";
+      } catch (err) {
+        alert("Camera access failed: " + err.message);
+        stageEl.textContent = "Camera access denied";
+      }
+    }
+
+    function stopEverything() {
+      if (intervalId) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
+        video.srcObject = null;
+      }
+
+      // Stop audio streaming
+      stopAudioStreaming();
+
+      processed.src = "";
+      processed.style.opacity = "0";
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      audioDeviceSelect.disabled = false;
+      stageEl.textContent = "Stopped";
+      visualEl.textContent = "—"; visualEl.className = "";
+      soundEl.textContent = "—"; soundEl.className = "";
+      acidEl.textContent = "—"; acidEl.className = "";
+    }
+
+    function sendFrame() {
+      if (!video.videoWidth || isProcessing) return;
+
+      isProcessing = true;
+
+      const canvas = document.createElement('canvas');
+      // We force 640×480 output (most models work well with this size)
+      canvas.width = CAPTURE_WIDTH;
+      canvas.height = CAPTURE_HEIGHT;
+
+      const ctx = canvas.getContext('2d');
+      // Center-crop or letterbox — here we simply scale to fit
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      canvas.toBlob(async (blob) => {
+        if (!blob) {
+          isProcessing = false;
+          return;
+        }
+
+        try {
+          const formData = new FormData();
+          formData.append("frame", blob, "frame.jpg");
+
+          const res = await fetch(BACKEND_URL, {
+            method: "POST",
+            body: formData
+          });
+
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+          const data = await res.json();
+
+          // Update UI
+          processed.src = `data:image/jpeg;base64,${data.image}`;
+          processed.style.opacity = "1";
+
+          stageEl.textContent = data.stage || "—";
+
+          visualEl.textContent = data.visual_ok ? "OK" : "NOT OK";
+          visualEl.className = data.visual_ok ? "ok" : "error";
+
+          soundEl.textContent = data.sound_status || "Waiting...";
+          soundEl.className =
+            data.sound_status === "OK" ? "ok" :
+              data.sound_status === "NOT OK" ? "error" : "";
+
+          acidEl.textContent = data.acid_detected ? "ACID DETECTED!" : "No Acid";
+          acidEl.className = data.acid_detected ? "ok" : "";
+
+        } catch (e) {
+          console.error("Send frame error:", e);
+          stageEl.textContent = `Connection error: ${e.message}`;
+        } finally {
+          isProcessing = false;
+        }
+      }, 'image/jpeg', JPEG_QUALITY);
+    }
+
+    // ==================== EVENT LISTENERS ====================
+
+    startBtn.onclick = async () => {
+      await startCamera();
+      if (!stream) return;
+
+      // Start sending frames
+      intervalId = setInterval(sendFrame, 1000 / TARGET_FPS);
+    };
+
+    stopBtn.onclick = stopEverything;
+
+    // Cleanup
+    window.onbeforeunload = stopEverything;
+  </script>
+</body>
+
+</html>
